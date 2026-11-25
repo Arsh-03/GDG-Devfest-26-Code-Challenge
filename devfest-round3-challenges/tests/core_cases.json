@@ -1,0 +1,41 @@
+[
+  {
+    "name": "bug1_invalid_sensor_rejected",
+    "description": "Disabling a non-existent sensor ID must return ERR INVALID_SENSOR and leave sensor 0 armed.",
+    "input": "DISABLE 9 1\nTRIGGER 0 2 2\nEXIT\n",
+    "expected": [
+      "ERR INVALID_SENSOR",
+      "ALERT 2"
+    ]
+  },
+  {
+    "name": "bug2_guard_patrol_4_zone_loop",
+    "description": "Guard patrol must cycle through all 4 zones (0 -> 1 -> 2 -> 3 -> 0).",
+    "input": "WAIT 1\nWAIT 2\nWAIT 1\nWAIT 1\nEXIT\n",
+    "expected": [
+      "GUARD 1 TIME 1",
+      "GUARD 3 TIME 3",
+      "GUARD 0 TIME 4",
+      "GUARD 1 TIME 5"
+    ]
+  },
+  {
+    "name": "bug3_pass_expiry_exclusive",
+    "description": "Silent pass expires strictly at expires_at (valid only when at_time < pass_expiry).",
+    "input": "GRANT_PASS 10\nTRIGGER 0 9 2\nTRIGGER 0 10 2\nEXIT\n",
+    "expected": [
+      "PASS_SET 10",
+      "SUPPRESSED",
+      "ALERT 2"
+    ]
+  },
+  {
+    "name": "bug4_simultaneous_highest_alert_kept",
+    "description": "Within the same timestamp, alert_level must never be downgraded by a lower severity event.",
+    "input": "TRIGGER 0 5 3\nTRIGGER 1 5 1\nEXIT\n",
+    "expected": [
+      "ALERT 3",
+      "ALERT 3"
+    ]
+  }
+]
