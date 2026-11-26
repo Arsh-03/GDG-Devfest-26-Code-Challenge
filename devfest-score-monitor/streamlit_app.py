@@ -6,8 +6,16 @@ from pathlib import Path
 
 import streamlit as st
 
-from leaderboard import DEFAULT_DATA_FILE, compute_standings, load_submissions
-from simulate_race import simulate
+from leaderboard import (
+    DEFAULT_DATA_FILE,
+    DEFAULT_PARTICIPANTS_FILE,
+    compute_standings,
+    load_participants,
+    load_submissions,
+    save_participants,
+)
+from runner import DEFAULT_CHALLENGES_ROOT, judge_code
+from simulate_race import build_core_only_python, simulate
 
 st.set_page_config(
     page_title="DevFest '26 Belagavi — The Diamond Heist",
@@ -111,6 +119,155 @@ with st.sidebar:
         st.session_state.frozen_rows = None
         st.rerun()
 
+    st.divider()
+    st.subheader("👥 Participant Mapping")
+    roster = load_participants(DEFAULT_PARTICIPANTS_FILE)
+    with st.form("map_participant_form", clear_on_submit=True):
+        m_id = st.text_input("Team / Sync ID", placeholder="e.g. team_01 or CyberPhantoms")
+        m_name = st.text_input("Display Team Name", placeholder="e.g. Cyber Phantoms")
+        m_members = st.text_input("Participant Names", placeholder="e.g. Alice, Bob")
+        if st.form_submit_button("Save Mapping", width="stretch"):
+            if m_id.strip():
+                roster[m_id.strip()] = {
+                    "name": m_name.strip() or m_id.strip(),
+                    "members": m_members.strip(),
+                }
+                save_participants(roster, DEFAULT_PARTICIPANTS_FILE)
+                st.toast(f"Mapped '{m_id.strip()}'")
+                st.rerun()
+
+    if roster:
+        with st.expander(f"Mapped Participants ({len(roster)})"):
+            for tid, info in list(roster.items()):
+                st.caption(f"**{tid}** → {info.get('name', tid)} ({info.get('members') or 'No members listed'})")
+            if st.button("Clear All Mappings", width="stretch"):
+                save_participants({}, DEFAULT_PARTICIPANTS_FILE)
+                st.rerun()
+
+    st.divider()
+    st.subheader("🧪 Manual Test & Judge")
+    team_options = list(roster.keys())
+    selected_id = st.selectbox("Select Mapped Team (or type below)", options=[""] + team_options)
+    manual_team = st.text_input("Team ID to Test", value=selected_id or "TestTeam_1")
+    manual_member_names = st.text_input(
+        "Participant Name(s) (auto-maps)",
+        value=roster.get(manual_team.strip(), {}).get("members", ""),
+        placeholder="e.g. Rahul, Priya",
+    )
+    test_mode = st.selectbox(
+        "Test Mode",
+        [
+            "Preset: Reference Solution (7/7 Pass - 100 pts)",
+            "Preset: Core Only (4/7 Pass - 60 pts)",
+            "Preset: Buggy Starter (Fails)",
+            "Upload Starter File (.py / .c / .java)",
+            "Paste Code Manually",
+            "Direct Score Override (Manual Points)",
+        ],
+    )
+    manual_lang = st.selectbox("Language", ["Python", "C", "Java"])
+    ext_map = {"Python": "starter.py", "C": "starter.c", "Java": "Starter.java"}
+    lang_folder = {"Python": "python", "C": "c", "Java": "java"}[manual_lang]
+
+    uploaded_file = None
+    pasted_code = ""
+    manual_core_pass = 4
+    manual_ext_pass = 3
+    manual_clean = 20.0
+
+    if test_mode == "Upload Starter File (.py / .c / .java)":
+        uploaded_file = st.file_uploader("Choose file", type=["py", "c", "java"])
+    elif test_mode == "Paste Code Manually":
+        default_src = (DEFAULT_CHALLENGES_ROOT / lang_folder / ext_map[manual_lang]).read_text(encoding="utf-8")
+        pasted_code = st.text_area("Source Code", value=default_src, height=180)
+    elif test_mode == "Direct Score Override (Manual Points)":
+        manual_core_pass = st.slider("Core Tests Passed (out of 4)", 0, 4, 4)
+        manual_ext_pass = st.slider("Escape Tests Passed (out of 3)", 0, 3, 2)
+        manual_clean = st.slider("Cleanliness Score (0-20)", 0.0, 20.0, 18.0, 0.5)
+
+    if st.button("Run Manual Test", type="primary", width="stretch"):
+        tid = manual_team.strip()
+        if not tid:
+            st.error("Enter a Team ID.")
+        else:
+            if manual_member_names.strip():
+                existing_name = roster.get(tid, {}).get("name", tid)
+                roster[tid] = {"name": existing_name, "members": manual_member_names.strip()}
+                save_participants(roster, DEFAULT_PARTICIPANTS_FILE)
+
+            if test_mode == "Direct Score Override (Manual Points)":
+                import json
+                from datetime import datetime, timezone
+
+                c_pts = round(40.0 * (manual_core_pass / 4), 2)
+                e_pts = round(30.0 * (manual_ext_pass / 3), 2)
+                done = manual_core_pass == 4 and manual_ext_pass == 3
+                bonus = 10.0 if done else 0.0
+                now_iso = datetime.now(timezone.utc).isoformat()
+                rec = {
+                    "team": tid,
+                    "challenge": "diamond_heist",
+                    "language": manual_lang,
+                    "filename": ext_map[manual_lang],
+                    "submitted_at": now_iso,
+                    "completed_all": done,
+                    "completed_at": now_iso if done else None,
+                    "compile_error": None,
+                    "core": {"passed": manual_core_pass, "total": 4, "failed": 4 - manual_core_pass, "errors": 0, "timed_out": False, "score": c_pts, "details": []},
+                    "extension": {"passed": manual_ext_pass, "total": 3, "failed": 3 - manual_ext_pass, "errors": 0, "timed_out": False, "score": e_pts, "details": []},
+                    "cleanliness": {"score": manual_clean, "override": True, "notes": ["Manual judge score entry"]},
+                    "speed_bonus": bonus,
+                    "total_score": round(c_pts + e_pts + manual_clean + bonus, 2),
+                }
+                existing = load_submissions(data_file)
+                existing.append(rec)
+                data_file.parent.mkdir(parents=True, exist_ok=True)
+                data_file.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+                st.session_state.last_test_result = rec
+                st.rerun()
+            else:
+                fname = ext_map[manual_lang]
+                code_to_run = None
+                ref_name = "reference_solution.py" if manual_lang == "Python" else ("reference_solution.c" if manual_lang == "C" else "ReferenceSolution.java")
+                if test_mode.startswith("Preset: Reference"):
+                    code_to_run = (DEFAULT_CHALLENGES_ROOT / lang_folder / ref_name).read_text(encoding="utf-8")
+                    if manual_lang == "Java":
+                        code_to_run = code_to_run.replace("class ReferenceSolution", "class Starter")
+                elif test_mode.startswith("Preset: Core Only"):
+                    py_ref = (DEFAULT_CHALLENGES_ROOT / "python" / "reference_solution.py").read_text(encoding="utf-8")
+                    code_to_run = build_core_only_python(py_ref)
+                    fname = "starter.py"
+                elif test_mode.startswith("Preset: Buggy"):
+                    code_to_run = (DEFAULT_CHALLENGES_ROOT / lang_folder / ext_map[manual_lang]).read_text(encoding="utf-8")
+                elif test_mode.startswith("Upload"):
+                    if uploaded_file is None:
+                        st.error("Please upload a file first.")
+                    else:
+                        fname = uploaded_file.name
+                        code_to_run = uploaded_file.getvalue().decode("utf-8")
+                elif test_mode.startswith("Paste"):
+                    code_to_run = pasted_code
+
+                if code_to_run is not None:
+                    rec = judge_code(
+                        team=tid,
+                        filename=fname,
+                        code_text=code_to_run,
+                        data_file=data_file,
+                    )
+                    st.session_state.last_test_result = rec
+                    st.rerun()
+
+    if "last_test_result" in st.session_state:
+        res = st.session_state.last_test_result
+        st.success(
+            f"**{res['team']}** ({res['language']}) → **{res['total_score']} pts** "
+            f"(Core {res['core']['passed']}/{res['core']['total']}, "
+            f"Escape {res['extension']['passed']}/{res['extension']['total']})"
+        )
+        if res.get("compile_error"):
+            st.error(res["compile_error"])
+
 
 def render_diamond_card(num: int, winner: dict | None):
     if winner is None:
@@ -123,12 +280,15 @@ def render_diamond_card(num: int, winner: dict | None):
         """
     cls = "stolen-1" if num == 1 else "stolen-2"
     team = html.escape(winner["team"])
+    members = html.escape(winner.get("participants", ""))
+    member_html = f'<div class="d-meta" style="color:#cbd5e1;">👤 {members}</div>' if members else ""
     lang = html.escape(winner["language"])
     comp = html.escape(winner["completed_at"] or "")
     return f"""
     <div class="diamond-card {cls}">
       <div class="d-label">💎 DevFest Diamond #{num} — STOLEN!</div>
       <div class="d-team">{team}</div>
+      {member_html}
       <div class="d-meta">Lang: {lang} · Score: {winner['total_score']:.1f} · {comp}</div>
     </div>
     """
@@ -161,6 +321,7 @@ def live_board():
         table_rows.append({
             "Rank": f"#{r['rank']}",
             "Team": r["team"],
+            "Participants": r.get("participants") or "-",
             "Lang": r["language"],
             "Vault Breach %": pct,
             "Core": f"{r['core_passed']}/{r['core_total']}",

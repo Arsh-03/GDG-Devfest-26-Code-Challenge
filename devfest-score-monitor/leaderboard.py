@@ -9,6 +9,24 @@ from pathlib import Path
 from runner import DEFAULT_CHALLENGES_ROOT, DEFAULT_DATA_FILE, judge_code
 
 MAX_SUBMISSION_BYTES = 256 * 1024
+DEFAULT_PARTICIPANTS_FILE = Path(__file__).resolve().parent / "data" / "participants.json"
+
+
+def load_participants(path: Path = DEFAULT_PARTICIPANTS_FILE) -> dict[str, dict]:
+    """Load participant/team roster mapping {team_id: {'name': str, 'members': str}}."""
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+def save_participants(mapping: dict[str, dict], path: Path = DEFAULT_PARTICIPANTS_FILE) -> None:
+    """Save participant/team roster mapping to JSON."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(mapping, indent=2), encoding="utf-8")
 
 
 def load_submissions(data_file: Path) -> list[dict]:
@@ -22,7 +40,11 @@ def load_submissions(data_file: Path) -> list[dict]:
         return []
 
 
-def compute_standings(records: list[dict], challenge: str | None = None) -> list[dict]:
+def compute_standings(
+    records: list[dict],
+    challenge: str | None = None,
+    participants: dict[str, dict] | None = None,
+) -> list[dict]:
     """Aggregate latest status per team (preserving earliest completion) and rank them.
 
     Tie-breaker order:
@@ -31,6 +53,7 @@ def compute_standings(records: list[dict], challenge: str | None = None) -> list
       3. Higher total_score (desc)
       4. Team name (asc)
     """
+    roster = participants if participants is not None else load_participants()
     filtered = [r for r in records if challenge is None or r.get("challenge") == challenge]
     by_team: dict[str, dict] = {}
 
@@ -55,8 +78,12 @@ def compute_standings(records: list[dict], challenge: str | None = None) -> list
         ext = rec.get("extension", {})
         tests_passed = core.get("passed", 0) + ext.get("passed", 0)
         tests_total = core.get("total", 0) + ext.get("total", 0)
+        team_id = rec["team"]
+        p_info = roster.get(team_id, {})
         rows.append({
-            "team": rec["team"],
+            "team_id": team_id,
+            "team": p_info.get("name") or team_id,
+            "participants": p_info.get("members", ""),
             "challenge": rec.get("challenge", "diamond_heist"),
             "language": rec.get("language", "Python"),
             "core_passed": core.get("passed", 0),
